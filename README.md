@@ -1,15 +1,18 @@
-# PDF2Q - PDF Extraction Microservice
+# PDF2Q - Document Extraction Microservice
 
-A dedicated microservice for reliable PDF text extraction using PyPDF2, designed for deployment on Render.com.
+A comprehensive microservice for reliable document text extraction supporting PDF, text files, and OCR for images. Designed for deployment on Render.com with multiple fallback extraction methods.
 
 ## Features
 
-- 🔍 **Reliable PDF Text Extraction** - Uses PyPDF2 for consistent text extraction
-- 🌐 **REST API** - Simple HTTP endpoints for PDF processing
+- 🔍 **Multi-Format Document Extraction** - Supports PDF, text files, and images
+- 📄 **Multiple PDF Extraction Methods** - PyPDF2, pdfplumber, and pdfminer fallbacks
+- 🖼️ **OCR Support** - Tesseract OCR for image-based documents with German language support
+- 🌐 **REST API** - Simple HTTP endpoints for document processing
 - 📄 **Multiple Input Formats** - Supports file uploads and base64 encoded data
 - 🚀 **Production Ready** - Optimized for deployment on Render.com
 - 🔧 **German Tax Documents** - Optimized for German financial documents
-- 📊 **Metadata Extraction** - Extracts PDF metadata and document information
+- 📊 **Metadata Extraction** - Extracts document metadata and processing information
+- 🛡️ **Robust Error Handling** - Graceful fallbacks when extraction methods fail
 
 ## API Endpoints
 
@@ -19,22 +22,34 @@ GET /
 ```
 Returns service status and version information.
 
-### Extract PDF Text
+### Extract Document Text
 ```
 POST /extract
 ```
+
+**Supported File Types:**
+- PDF documents (`.pdf`)
+- Text files (`.txt`, `.md`, etc.)
+- Image files (`.png`, `.jpg`, `.jpeg`, `.gif`, `.bmp`) with OCR
 
 **Input Options:**
 
 1. **Multipart Form Data:**
 ```bash
+# PDF file
 curl -X POST -F "file=@document.pdf" https://your-service.onrender.com/extract
+
+# Text file
+curl -X POST -F "file=@document.txt" https://your-service.onrender.com/extract
+
+# Image file (OCR)
+curl -X POST -F "file=@scanned_document.png" https://your-service.onrender.com/extract
 ```
 
 2. **JSON with Base64:**
 ```bash
 curl -X POST -H "Content-Type: application/json" \
-  -d '{"data":"base64_encoded_pdf_data","filename":"document.pdf"}' \
+  -d '{"data":"base64_encoded_file_data","filename":"document.pdf","mime_type":"application/pdf"}' \
   https://your-service.onrender.com/extract
 ```
 
@@ -46,6 +61,8 @@ curl -X POST -H "Content-Type: application/json" \
   "text_length": 1234,
   "pages": 3,
   "filename": "document.pdf",
+  "mime_type": "application/pdf",
+  "method": "PyPDF2",
   "metadata": {
     "title": "Document Title",
     "author": "Author Name",
@@ -54,6 +71,11 @@ curl -X POST -H "Content-Type: application/json" \
   "error": null
 }
 ```
+
+**Extraction Methods:**
+- **PDF Files**: PyPDF2 → pdfplumber → pdfminer (fallback chain)
+- **Text Files**: Direct UTF-8/Latin-1/CP1252 decoding
+- **Image Files**: Tesseract OCR with German + English language support
 
 ### Test Endpoint
 ```
@@ -88,22 +110,35 @@ curl http://localhost:5000/
 
 ## Integration with Main Application
 
-Update your main application to use this service:
+Update your main application to use this enhanced service:
 
 ```javascript
-const PDF_SERVICE_URL = 'https://your-pdf2q-service.onrender.com';
+const DOCUMENT_SERVICE_URL = 'https://your-pdf2q-service.onrender.com';
 
-async function extractPDFText(buffer, filename) {
+async function extractDocumentText(buffer, filename, mimeType) {
   const formData = new FormData();
-  formData.append('file', new Blob([buffer]), filename);
+  formData.append('file', new Blob([buffer], { type: mimeType }), filename);
   
-  const response = await fetch(`${PDF_SERVICE_URL}/extract`, {
+  const response = await fetch(`${DOCUMENT_SERVICE_URL}/extract`, {
     method: 'POST',
     body: formData
   });
   
-  return await response.json();
+  const result = await response.json();
+  
+  if (result.success) {
+    console.log(`Extracted ${result.text_length} characters using ${result.method}`);
+    return result.text;
+  } else {
+    console.error(`Extraction failed: ${result.error}`);
+    throw new Error(result.error);
+  }
 }
+
+// Usage examples:
+// await extractDocumentText(pdfBuffer, 'document.pdf', 'application/pdf');
+// await extractDocumentText(txtBuffer, 'document.txt', 'text/plain');
+// await extractDocumentText(imgBuffer, 'scan.png', 'image/png');
 ```
 
 ## Architecture Benefits
