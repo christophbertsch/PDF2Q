@@ -386,12 +386,14 @@ def health_check():
     return jsonify({
         'status': 'OK',
         'service': 'PDF Extraction Service',
-        'version': '1.0.0',
+        'version': '1.1.0',
         'python_version': os.sys.version,
         'libraries': {
             'PyPDF2': PyPDF2.__version__,
             'Flask': '2.3.3'
-        }
+        },
+        'features': ['multi-format', 'german-encoding', 'ocr', 'fallback-methods'],
+        'last_updated': '2025-08-15'
     })
 
 @app.route('/extract', methods=['POST'])
