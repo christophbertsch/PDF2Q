@@ -24,7 +24,7 @@ CORS(app)
 
 def extract_pdf_text(pdf_bytes):
     """
-    Extract text from PDF bytes using PyPDF2
+    Extract text from PDF bytes using multiple methods with encoding support
     
     Args:
         pdf_bytes: PDF file as bytes
@@ -32,7 +32,10 @@ def extract_pdf_text(pdf_bytes):
     Returns:
         dict: Extraction result with success status, text, and metadata
     """
+    
+    # Method 1: Try PyPDF2 with enhanced text extraction
     try:
+        logger.info("Attempting PyPDF2 extraction...")
         pdf_stream = BytesIO(pdf_bytes)
         pdf_reader = PyPDF2.PdfReader(pdf_stream)
         
@@ -40,15 +43,41 @@ def extract_pdf_text(pdf_bytes):
         num_pages = len(pdf_reader.pages)
         logger.info(f"PDF has {num_pages} pages")
         
-        # Extract text from all pages
+        # Extract text from all pages with enhanced extraction
         extracted_text = ""
         for page_num in range(num_pages):
             page = pdf_reader.pages[page_num]
-            page_text = page.extract_text()
-            extracted_text += page_text + "\n"
+            
+            # Try multiple extraction methods for each page
+            page_text = ""
+            
+            # Standard extraction
+            try:
+                page_text = page.extract_text()
+            except Exception as e:
+                logger.warning(f"Standard extraction failed for page {page_num}: {e}")
+            
+            # If standard extraction fails or returns minimal text, try alternative methods
+            if not page_text or len(page_text.strip()) < 10:
+                try:
+                    # Try extracting with different parameters
+                    page_text = page.extract_text(extraction_mode="layout")
+                except:
+                    try:
+                        # Fallback to basic extraction
+                        page_text = page.extract_text(extraction_mode="plain")
+                    except:
+                        logger.warning(f"All extraction methods failed for page {page_num}")
+            
+            if page_text:
+                extracted_text += page_text + "\n"
         
-        # Clean up the text
+        # Clean up the text and handle encoding
         extracted_text = extracted_text.strip()
+        
+        # Apply text cleaning for German documents
+        if extracted_text:
+            extracted_text = clean_extracted_text(extracted_text)
         
         # Get metadata
         metadata = {}
@@ -63,25 +92,144 @@ def extract_pdf_text(pdf_bytes):
                 'modification_date': str(pdf_reader.metadata.get('/ModDate', ''))
             }
         
-        return {
-            'success': True,
-            'text': extracted_text,
-            'text_length': len(extracted_text),
-            'pages': num_pages,
-            'metadata': metadata,
-            'error': None
-        }
+        if extracted_text and len(extracted_text.strip()) > 10:
+            logger.info(f"PyPDF2 extraction successful: {len(extracted_text)} characters")
+            return {
+                'success': True,
+                'text': extracted_text,
+                'text_length': len(extracted_text),
+                'pages': num_pages,
+                'metadata': metadata,
+                'method': 'PyPDF2',
+                'error': None
+            }
+        else:
+            logger.warning("PyPDF2 extracted minimal text, trying fallback methods...")
+            
+    except Exception as e:
+        logger.error(f"PyPDF2 extraction failed: {str(e)}")
+    
+    # Method 2: Try basic binary text extraction as fallback
+    try:
+        logger.info("Attempting basic binary extraction...")
+        extracted_text = extract_text_from_binary(pdf_bytes)
+        
+        if extracted_text and len(extracted_text.strip()) > 10:
+            logger.info(f"Binary extraction successful: {len(extracted_text)} characters")
+            return {
+                'success': True,
+                'text': extracted_text,
+                'text_length': len(extracted_text),
+                'pages': 1,  # Unknown page count for binary extraction
+                'metadata': {},
+                'method': 'Binary',
+                'error': None
+            }
+            
+    except Exception as e:
+        logger.error(f"Binary extraction failed: {str(e)}")
+    
+    # If all methods fail
+    logger.error("All extraction methods failed")
+    return {
+        'success': False,
+        'text': '',
+        'text_length': 0,
+        'pages': 0,
+        'metadata': {},
+        'method': 'None',
+        'error': 'All extraction methods failed'
+    }
+
+
+def clean_extracted_text(text):
+    """
+    Clean and normalize extracted text, especially for German documents
+    """
+    import re
+    
+    if not text:
+        return text
+    
+    # Remove excessive whitespace
+    text = re.sub(r'\s+', ' ', text)
+    
+    # Fix common PDF extraction issues
+    text = re.sub(r'([a-z])([A-Z])', r'\1 \2', text)  # Add space between camelCase
+    
+    # Clean up PDF artifacts
+    text = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]', '', text)  # Remove control characters
+    
+    # Handle German umlauts and special characters that might be encoded incorrectly
+    replacements = {
+        'Ã¤': 'ä', 'Ã¶': 'ö', 'Ã¼': 'ü',
+        'Ã„': 'Ä', 'Ã–': 'Ö', 'Ãœ': 'Ü',
+        'ÃŸ': 'ß', 'â‚¬': '€'
+    }
+    
+    for wrong, correct in replacements.items():
+        text = text.replace(wrong, correct)
+    
+    return text.strip()
+
+
+def extract_text_from_binary(pdf_bytes):
+    """
+    Extract text from PDF using binary analysis as fallback
+    """
+    import re
+    
+    try:
+        # Try UTF-8 decoding first
+        try:
+            text_content = pdf_bytes.decode('utf-8', errors='ignore')
+        except:
+            # Fallback to latin-1
+            text_content = pdf_bytes.decode('latin-1', errors='ignore')
+        
+        # Extract text using regex patterns
+        text_patterns = [
+            r'\((.*?)\)',  # Text in parentheses
+            r'<(.*?)>',    # Text in angle brackets
+            r'/Title\s*\((.*?)\)',  # Title field
+            r'/Subject\s*\((.*?)\)',  # Subject field
+            r'BT\s+(.*?)\s+ET',  # Text between BT and ET markers
+            r'Tj\s*\[(.*?)\]',  # Text arrays
+            r'Tf\s+(.*?)\s+Tj',  # Text with font info
+        ]
+        
+        extracted_parts = []
+        
+        for pattern in text_patterns:
+            matches = re.findall(pattern, text_content, re.DOTALL | re.IGNORECASE)
+            for match in matches:
+                if isinstance(match, str) and len(match.strip()) > 2:
+                    # Clean the match
+                    clean_match = re.sub(r'[^\w\s\-.,;:!?äöüÄÖÜß€]', ' ', match)
+                    clean_match = re.sub(r'\s+', ' ', clean_match).strip()
+                    if len(clean_match) > 3:
+                        extracted_parts.append(clean_match)
+        
+        # Combine and deduplicate
+        if extracted_parts:
+            combined_text = ' '.join(extracted_parts)
+            # Remove duplicates while preserving order
+            words = combined_text.split()
+            seen = set()
+            unique_words = []
+            for word in words:
+                if word.lower() not in seen:
+                    seen.add(word.lower())
+                    unique_words.append(word)
+            
+            result = ' '.join(unique_words)
+            return clean_extracted_text(result)
+        
+        return ""
         
     except Exception as e:
-        logger.error(f"PDF extraction failed: {str(e)}")
-        return {
-            'success': False,
-            'text': '',
-            'text_length': 0,
-            'pages': 0,
-            'metadata': {},
-            'error': str(e)
-        }
+        logger.error(f"Binary extraction error: {e}")
+        return ""
 
 @app.route('/', methods=['GET'])
 def health_check():
