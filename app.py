@@ -12,6 +12,8 @@ import json
 import logging
 import tempfile
 import subprocess
+import re
+import unicodedata
 from io import BytesIO
 from flask import Flask, request, jsonify
 from flask_cors import CORS
@@ -27,6 +29,67 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 CORS(app)
 
+def clean_extracted_text(text):
+    """
+    Clean and normalize extracted text, especially for German characters
+    
+    Args:
+        text: Raw extracted text
+        
+    Returns:
+        str: Cleaned and normalized text
+    """
+    if not text:
+        return ""
+    
+    # Normalize Unicode characters (especially important for German umlauts)
+    text = unicodedata.normalize('NFKC', text)
+    
+    # Remove control characters but keep newlines and tabs
+    text = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]', '', text)
+    
+    # Fix common encoding issues with German characters
+    replacements = {
+        'Ã¤': 'ä', 'Ã¶': 'ö', 'Ã¼': 'ü', 'ÃŸ': 'ß',
+        'Ã„': 'Ä', 'Ã–': 'Ö', 'Ãœ': 'Ü',
+        'â‚¬': '€', 'â€œ': '"', 'â€': '"', 'â€™': "'",
+        'â€¦': '...', 'â€"': '–', 'â€"': '—'
+    }
+    
+    for wrong, correct in replacements.items():
+        text = text.replace(wrong, correct)
+    
+    # Remove excessive whitespace while preserving paragraph structure
+    text = re.sub(r'\n\s*\n\s*\n', '\n\n', text)  # Max 2 consecutive newlines
+    text = re.sub(r'[ \t]+', ' ', text)  # Multiple spaces/tabs to single space
+    text = re.sub(r' *\n *', '\n', text)  # Remove spaces around newlines
+    
+    return text.strip()
+
+def is_text_readable(text, min_readable_ratio=0.7):
+    """
+    Check if extracted text is readable (not garbled)
+    
+    Args:
+        text: Text to check
+        min_readable_ratio: Minimum ratio of readable characters
+        
+    Returns:
+        bool: True if text appears readable
+    """
+    if not text or len(text.strip()) < 10:
+        return False
+    
+    # Count readable characters (letters, numbers, common punctuation, spaces)
+    readable_chars = len(re.findall(r'[a-zA-ZäöüßÄÖÜ0-9\s.,;:!?()[\]{}"\'-]', text))
+    total_chars = len(text)
+    
+    if total_chars == 0:
+        return False
+    
+    readable_ratio = readable_chars / total_chars
+    return readable_ratio >= min_readable_ratio
+
 def extract_pdf_text_reliable(pdf_bytes):
     """
     Extract text from PDF bytes using multiple fallback methods
@@ -38,7 +101,7 @@ def extract_pdf_text_reliable(pdf_bytes):
         dict: Extraction result with success status, text, and metadata
     """
     try:
-        # Method 1: PyPDF2
+        # Method 1: PyPDF2 with enhanced German text handling
         try:
             pdf_stream = BytesIO(pdf_bytes)
             pdf_reader = PyPDF2.PdfReader(pdf_stream)
@@ -52,10 +115,14 @@ def extract_pdf_text_reliable(pdf_bytes):
             for page_num in range(num_pages):
                 page = pdf_reader.pages[page_num]
                 page_text = page.extract_text()
-                extracted_text += page_text + "\n"
+                if page_text:
+                    extracted_text += page_text + "\n"
             
-            # Clean up the text
-            extracted_text = extracted_text.strip()
+            # Clean and normalize the text for German characters
+            extracted_text = clean_extracted_text(extracted_text)
+            
+            # Check if text is readable
+            is_readable = is_text_readable(extracted_text)
             
             # Get metadata
             metadata = {}
@@ -70,24 +137,24 @@ def extract_pdf_text_reliable(pdf_bytes):
                     'modification_date': str(pdf_reader.metadata.get('/ModDate', ''))
                 }
             
-            if extracted_text and len(extracted_text.strip()) > 10:
-                logger.info(f"PyPDF2 extracted {len(extracted_text)} characters from {num_pages} pages")
+            if extracted_text and len(extracted_text.strip()) > 10 and is_readable:
+                logger.info(f"PyPDF2 extracted {len(extracted_text)} characters from {num_pages} pages (readable: {is_readable})")
                 return {
                     'success': True,
                     'text': extracted_text,
                     'text_length': len(extracted_text),
                     'pages': num_pages,
                     'metadata': metadata,
-                    'method': 'PyPDF2',
+                    'method': 'PyPDF2-enhanced',
                     'error': None
                 }
             else:
-                logger.warning("PyPDF2 extracted insufficient text, trying fallback methods")
+                logger.warning(f"PyPDF2 extracted text but quality insufficient (readable: {is_readable}), trying fallback methods")
                 
         except Exception as e:
             logger.warning(f"PyPDF2 failed: {str(e)}, trying fallback methods")
         
-        # Method 2: pdfplumber fallback
+        # Method 2: pdfplumber fallback with text cleaning
         try:
             import pdfplumber
             with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
@@ -97,16 +164,19 @@ def extract_pdf_text_reliable(pdf_bytes):
                     if page_text:
                         extracted_text += page_text + "\n"
                 
-                extracted_text = extracted_text.strip()
-                if extracted_text and len(extracted_text.strip()) > 10:
-                    logger.info(f"pdfplumber extracted {len(extracted_text)} characters")
+                # Clean and normalize the text
+                extracted_text = clean_extracted_text(extracted_text)
+                is_readable = is_text_readable(extracted_text)
+                
+                if extracted_text and len(extracted_text.strip()) > 10 and is_readable:
+                    logger.info(f"pdfplumber extracted {len(extracted_text)} characters (readable: {is_readable})")
                     return {
                         'success': True,
                         'text': extracted_text,
                         'text_length': len(extracted_text),
                         'pages': len(pdf.pages),
                         'metadata': {},
-                        'method': 'pdfplumber',
+                        'method': 'pdfplumber-enhanced',
                         'error': None
                     }
         except ImportError:
@@ -114,19 +184,24 @@ def extract_pdf_text_reliable(pdf_bytes):
         except Exception as e:
             logger.warning(f"pdfplumber failed: {str(e)}")
         
-        # Method 3: pdfminer fallback
+        # Method 3: pdfminer fallback with text cleaning
         try:
             from pdfminer.high_level import extract_text
             extracted_text = extract_text(BytesIO(pdf_bytes))
-            if extracted_text and len(extracted_text.strip()) > 10:
-                logger.info(f"pdfminer extracted {len(extracted_text)} characters")
+            
+            # Clean and normalize the text
+            extracted_text = clean_extracted_text(extracted_text)
+            is_readable = is_text_readable(extracted_text)
+            
+            if extracted_text and len(extracted_text.strip()) > 10 and is_readable:
+                logger.info(f"pdfminer extracted {len(extracted_text)} characters (readable: {is_readable})")
                 return {
                     'success': True,
-                    'text': extracted_text.strip(),
-                    'text_length': len(extracted_text.strip()),
+                    'text': extracted_text,
+                    'text_length': len(extracted_text),
                     'pages': 1,  # pdfminer doesn't easily give page count
                     'metadata': {},
-                    'method': 'pdfminer',
+                    'method': 'pdfminer-enhanced',
                     'error': None
                 }
         except ImportError:
@@ -239,26 +314,37 @@ def extract_text_from_file(file_bytes, filename, mime_type):
         dict: Extraction result with success status and text
     """
     try:
-        # Handle text files
+        # Handle text files with enhanced encoding detection
         if mime_type.startswith('text/'):
-            try:
-                # Try UTF-8 first
-                text_content = file_bytes.decode('utf-8')
-            except UnicodeDecodeError:
+            text_content = None
+            encoding_used = 'unknown'
+            
+            # Try multiple encodings in order of preference for German text
+            encodings_to_try = ['utf-8', 'utf-8-sig', 'latin-1', 'cp1252', 'iso-8859-1']
+            
+            for encoding in encodings_to_try:
                 try:
-                    # Try latin-1 for German characters
-                    text_content = file_bytes.decode('latin-1')
+                    text_content = file_bytes.decode(encoding)
+                    encoding_used = encoding
+                    break
                 except UnicodeDecodeError:
-                    # Try cp1252 (Windows encoding)
-                    text_content = file_bytes.decode('cp1252', errors='ignore')
+                    continue
+            
+            # If all encodings fail, use utf-8 with error handling
+            if text_content is None:
+                text_content = file_bytes.decode('utf-8', errors='replace')
+                encoding_used = 'utf-8-replace'
+            
+            # Clean the text content
+            text_content = clean_extracted_text(text_content)
             
             return {
                 'success': True,
-                'text': f"Text Document: {filename}\n\nContent:\n{text_content.strip()}",
-                'text_length': len(text_content.strip()),
+                'text': f"Text Document: {filename}\n\nContent:\n{text_content}",
+                'text_length': len(text_content),
                 'pages': 1,
-                'metadata': {'encoding': 'text'},
-                'method': 'text-direct',
+                'metadata': {'encoding': encoding_used},
+                'method': 'text-enhanced',
                 'error': None
             }
         
